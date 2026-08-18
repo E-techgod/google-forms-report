@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: google-forms-report-generator-postgres
+    environment:
+      POSTGRES_DB: google_forms_reports_test
+      POSTGRES_USER: local_test_user
+      POSTGRES_PASSWORD: local_test_password
+    ports:
+      - "54329:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U local_test_user -d google_forms_reports_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
