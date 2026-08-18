@@ -113,12 +113,71 @@ def test_raw_form_submission_repository_contract(postgres_repositories) -> None:
 
     assert postgres_repositories.raw_submissions.insert(submission) is True
     assert postgres_repositories.raw_submissions.insert(submission) is False
+    assert (
+        postgres_repositories.raw_submissions.insert(
+            replace(submission, submission_id="submission-1b")
+        )
+        is False
+    )
+    assert (
+        postgres_repositories.raw_submissions.insert(
+            replace(submission, response_id="response-submission-1b")
+        )
+        is False
+    )
     assert postgres_repositories.raw_submissions.get(submission.submission_id) == submission
     assert (
         postgres_repositories.raw_submissions.find_by_response(submission.form_id, submission.response_id)
         == submission
     )
     assert postgres_repositories.raw_submissions.find_by_response("demo-form", "missing") is None
+
+
+def test_raw_form_submission_insert_allows_only_one_real_database_winner_for_duplicate_response(postgres_dsn: str) -> None:
+    from src.persistence.postgres import PostgresRepositories
+
+    repositories = [
+        PostgresRepositories(postgres_dsn.replace("postgresql://", "postgresql+psycopg://", 1))
+        for _ in range(2)
+    ]
+    submissions = [
+        _raw_submission("response-race-a"),
+        replace(_raw_submission("response-race-b"), response_id="response-response-race-a"),
+    ]
+    barrier = Barrier(2)
+    results: list[bool] = []
+    errors: list[Exception] = []
+
+    def attempt_insert(index: int) -> None:
+        barrier.wait()
+        try:
+            results.append(repositories[index].raw_submissions.insert(submissions[index]))
+        except Exception as exc:  # pragma: no cover - failure path asserted by errors
+            errors.append(exc)
+
+    threads = [Thread(target=attempt_insert, args=(index,)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    for repo in repositories:
+        repo.dispose()
+
+    assert errors == []
+    assert results.count(True) == 1
+    assert results.count(False) == 1
+
+
+def test_raw_form_submission_insert_returns_false_for_duplicate_submission_id(postgres_repositories) -> None:
+    submission = _raw_submission("duplicate-id")
+
+    assert postgres_repositories.raw_submissions.insert(submission) is True
+    assert (
+        postgres_repositories.raw_submissions.insert(
+            replace(submission, response_id="response-duplicate-id-2")
+        )
+        is False
+    )
 
 
 def test_normalized_application_repository_contract(postgres_repositories) -> None:

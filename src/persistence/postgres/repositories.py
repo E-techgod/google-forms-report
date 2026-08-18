@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from sqlalchemy import create_engine, desc, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -45,19 +46,9 @@ class PostgresRawFormSubmissionRepository:
 
     def insert(self, submission: RawFormSubmission) -> bool:
         with self._session_factory.begin() as session:
-            existing = session.get(RawFormSubmissionRow, submission.submission_id)
-            if existing is not None:
-                return False
-            response_match = session.execute(
-                select(RawFormSubmissionRow.submission_id).where(
-                    RawFormSubmissionRow.form_id == submission.form_id,
-                    RawFormSubmissionRow.response_id == submission.response_id,
-                )
-            ).scalar_one_or_none()
-            if response_match is not None:
-                return False
-            session.add(
-                RawFormSubmissionRow(
+            result = session.execute(
+                pg_insert(RawFormSubmissionRow)
+                .values(
                     submission_id=submission.submission_id,
                     form_id=submission.form_id,
                     response_id=submission.response_id,
@@ -65,8 +56,10 @@ class PostgresRawFormSubmissionRepository:
                     raw_payload=submission.raw_payload,
                     form_schema_version_at_receipt=submission.form_schema_version_at_receipt,
                 )
+                .on_conflict_do_nothing()
+                .returning(RawFormSubmissionRow.submission_id)
             )
-            return True
+            return result.first() is not None
 
     def get(self, submission_id: str) -> RawFormSubmission | None:
         with self._session_factory() as session:
