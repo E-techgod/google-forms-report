@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta
-from threading import Barrier, Event, Thread
+from threading import Barrier, Thread
+from time import monotonic, sleep
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -113,8 +115,14 @@ def _state(submission_id: str = "submission-1", status: SubmissionStatus = Submi
     )
 
 
-def _sqlalchemy_url(postgres_dsn: str) -> str:
-    return postgres_dsn.replace("postgresql://", "postgresql+psycopg://", 1)
+def _sqlalchemy_url(postgres_dsn: str, *, application_name: str | None = None) -> str:
+    url = postgres_dsn.replace("postgresql://", "postgresql+psycopg://", 1)
+    if application_name is None:
+        return url
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query["application_name"] = application_name
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
 def _raw_insert_statement(submission: RawFormSubmission):
@@ -132,9 +140,30 @@ def _raw_insert_statement(submission: RawFormSubmission):
     )
 
 
+def _wait_for_lock_wait(blocker_connection, contender_tag: str, *, timeout_seconds: float = 5.0) -> None:
+    wait_query = text(
+        """
+        SELECT 1
+        FROM pg_locks l
+        JOIN pg_stat_activity a ON a.pid = l.pid
+        WHERE a.application_name = :contender_tag
+          AND l.granted = false
+        LIMIT 1
+        """
+    )
+    deadline = monotonic() + timeout_seconds
+    while monotonic() < deadline:
+        waiting = blocker_connection.execute(wait_query, {"contender_tag": contender_tag}).first()
+        if waiting is not None:
+            return
+        sleep(0.05)
+    raise AssertionError("Contender never reached a waiting lock state")
+
+
 def _run_forced_duplicate_response_overlap(postgres_dsn: str, *, label: str, contender_callable):
     from src.persistence.postgres import PostgresRepositories
 
+    contender_tag = f"contender-{label}"
     sqlalchemy_url = _sqlalchemy_url(postgres_dsn)
     blocker_submission = _raw_submission(f"{label}-winner")
     contender_submission = replace(
@@ -142,16 +171,11 @@ def _run_forced_duplicate_response_overlap(postgres_dsn: str, *, label: str, con
         response_id=blocker_submission.response_id,
     )
     blocker_engine = create_engine(sqlalchemy_url, future=True)
-    contender_repositories = PostgresRepositories(sqlalchemy_url)
-    contender_insert_started = Event()
+    contender_repositories = PostgresRepositories(
+        _sqlalchemy_url(postgres_dsn, application_name=contender_tag)
+    )
     results: list[bool] = []
     errors: list[Exception] = []
-
-    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany) -> None:
-        if "INSERT INTO raw_form_submissions" in statement:
-            contender_insert_started.set()
-
-    event.listen(contender_repositories._engine, "before_cursor_execute", before_cursor_execute)
     try:
         with blocker_engine.connect() as blocker_connection:
             blocker_transaction = blocker_connection.begin()
@@ -165,7 +189,7 @@ def _run_forced_duplicate_response_overlap(postgres_dsn: str, *, label: str, con
 
             contender_thread = Thread(target=run_contender)
             contender_thread.start()
-            assert contender_insert_started.wait(timeout=5), "Contender insert never reached the database"
+            _wait_for_lock_wait(blocker_connection, contender_tag)
             blocker_transaction.commit()
             contender_thread.join(timeout=5)
             assert not contender_thread.is_alive(), "Contender thread remained blocked after blocker commit"
@@ -179,7 +203,6 @@ def _run_forced_duplicate_response_overlap(postgres_dsn: str, *, label: str, con
                 )
             ).scalar_one()
     finally:
-        event.remove(contender_repositories._engine, "before_cursor_execute", before_cursor_execute)
         contender_repositories.dispose()
         blocker_engine.dispose()
 
