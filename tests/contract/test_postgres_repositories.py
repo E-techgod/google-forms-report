@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
 
 import pytest
 
@@ -27,6 +28,7 @@ from src.domain.models import (
     SubmissionStatus,
 )
 from src.persistence.postgres.models import RawFormSubmissionRow
+from src.persistence.postgres.repositories import PostgresRawFormSubmissionRepository
 
 
 def _raw_submission(submission_id: str = "submission-1") -> RawFormSubmission:
@@ -140,20 +142,19 @@ def _raw_insert_statement(submission: RawFormSubmission):
     )
 
 
-def _wait_for_lock_wait(blocker_connection, contender_tag: str, *, timeout_seconds: float = 5.0) -> None:
+def _wait_for_lock_wait(blocker_connection, contender_pid: int, *, timeout_seconds: float = 5.0) -> None:
     wait_query = text(
         """
         SELECT 1
-        FROM pg_locks l
-        JOIN pg_stat_activity a ON a.pid = l.pid
-        WHERE a.application_name = :contender_tag
-          AND l.granted = false
+        FROM pg_locks
+        WHERE pid = :contender_pid
+          AND granted = false
         LIMIT 1
         """
     )
     deadline = monotonic() + timeout_seconds
     while monotonic() < deadline:
-        waiting = blocker_connection.execute(wait_query, {"contender_tag": contender_tag}).first()
+        waiting = blocker_connection.execute(wait_query, {"contender_pid": contender_pid}).first()
         if waiting is not None:
             return
         sleep(0.05)
@@ -165,14 +166,29 @@ def _run_forced_duplicate_response_overlap(postgres_dsn: str, *, label: str, con
 
     contender_tag = f"contender-{label}"
     sqlalchemy_url = _sqlalchemy_url(postgres_dsn)
+    contender_sqlalchemy_url = _sqlalchemy_url(postgres_dsn, application_name=contender_tag)
     blocker_submission = _raw_submission(f"{label}-winner")
     contender_submission = replace(
         _raw_submission(f"{label}-loser"),
         response_id=blocker_submission.response_id,
     )
     blocker_engine = create_engine(sqlalchemy_url, future=True)
-    contender_repositories = PostgresRepositories(
-        _sqlalchemy_url(postgres_dsn, application_name=contender_tag)
+    contender_engine = create_engine(
+        contender_sqlalchemy_url,
+        future=True,
+        pool_size=1,
+        max_overflow=0,
+    )
+    contender_session_factory = sessionmaker(contender_engine, expire_on_commit=False)
+    with contender_engine.connect() as contender_pid_connection:
+        contender_pid = contender_pid_connection.execute(text("SELECT pg_backend_pid()")).scalar_one()
+
+    contender_repositories = PostgresRepositories(contender_sqlalchemy_url)
+    contender_repositories.dispose()
+    contender_repositories._engine = contender_engine
+    contender_repositories._session_factory = contender_session_factory
+    contender_repositories.raw_submissions = PostgresRawFormSubmissionRepository(
+        contender_session_factory
     )
     results: list[bool] = []
     errors: list[Exception] = []
@@ -189,7 +205,7 @@ def _run_forced_duplicate_response_overlap(postgres_dsn: str, *, label: str, con
 
             contender_thread = Thread(target=run_contender)
             contender_thread.start()
-            _wait_for_lock_wait(blocker_connection, contender_tag)
+            _wait_for_lock_wait(blocker_connection, contender_pid)
             blocker_transaction.commit()
             contender_thread.join(timeout=5)
             assert not contender_thread.is_alive(), "Contender thread remained blocked after blocker commit"
