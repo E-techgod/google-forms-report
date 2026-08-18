@@ -1,0 +1,316 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import datetime, timedelta
+from threading import Barrier, Thread
+
+import pytest
+
+from src.domain.models import (
+    Assessment,
+    Delivery,
+    DeliveryStatus,
+    Narrative,
+    NormalizedApplication,
+    PipelineStage,
+    RawFormSubmission,
+    Report,
+    ReportType,
+    StageError,
+    SubmissionState,
+    SubmissionStatus,
+)
+
+
+def _raw_submission(submission_id: str = "submission-1") -> RawFormSubmission:
+    return RawFormSubmission(
+        submission_id=submission_id,
+        form_id="demo-form",
+        response_id=f"response-{submission_id}",
+        received_at=datetime(2026, 8, 18, 9, 0, 0),
+        raw_payload={"name": "test-applicant-001", "age": 42, "consent": True},
+        form_schema_version_at_receipt="schema-v1",
+    )
+
+
+def _normalized(submission_id: str = "submission-1", warnings: tuple[str, ...] = ()) -> NormalizedApplication:
+    return NormalizedApplication(
+        submission_id=submission_id,
+        form_schema_version="schema-v1",
+        fields={"applicant_name": "test-applicant-001", "age": 42, "eligible": True},
+        normalization_warnings=warnings,
+    )
+
+
+def _assessment(submission_id: str = "submission-1", reasons: tuple[str, ...] = ("Synthetic reason",)) -> Assessment:
+    return Assessment(
+        submission_id=submission_id,
+        rule_version="rules-v1",
+        rules_evaluated=("RULE-1", "RULE-2"),
+        rules_triggered=("RULE-2",),
+        reasons=reasons,
+        qualification="REVIEW",
+        classified_at=datetime(2026, 8, 18, 9, 5, 0),
+    )
+
+
+def _narrative(submission_id: str = "submission-1", attempt_number: int = 1, text: str = "Narrative") -> Narrative:
+    return Narrative(
+        submission_id=submission_id,
+        attempt_number=attempt_number,
+        provider="null-llm",
+        model="template-only",
+        prompt_version="prompt-v1",
+        raw_output='{"text":"Narrative"}',
+        validation_result="OK",
+        text=text,
+        generated_at=datetime(2026, 8, 18, 9, 10, 0) + timedelta(minutes=attempt_number),
+        used_fallback=attempt_number > 1,
+    )
+
+
+def _report(submission_id: str = "submission-1", report_type: ReportType = ReportType.CLIENT, ref_suffix: str = "a") -> Report:
+    return Report(
+        submission_id=submission_id,
+        report_type=report_type,
+        template_version=f"template-{report_type.value.lower()}-v1",
+        artifact_ref=f"{submission_id}-{report_type.value.lower()}-{ref_suffix}",
+        content=f"{report_type.value}-{ref_suffix}".encode(),
+        generated_at=datetime(2026, 8, 18, 9, 20, 0),
+    )
+
+
+def _delivery(
+    submission_id: str = "submission-1",
+    report_type: ReportType = ReportType.CLIENT,
+    attempt_number: int = 1,
+) -> Delivery:
+    recipient = "client@example.invalid" if report_type is ReportType.CLIENT else "internal@example.invalid"
+    return Delivery(
+        submission_id=submission_id,
+        report_type=report_type,
+        recipient=recipient,
+        delivery_key=f"{submission_id}:{report_type.value}:{recipient}",
+        attempt_number=attempt_number,
+        status=DeliveryStatus.SENT,
+        message_id=f"msg-{report_type.value.lower()}-{attempt_number}",
+        attempted_at=datetime(2026, 8, 18, 9, 30, 0) + timedelta(minutes=attempt_number),
+        sent_at=datetime(2026, 8, 18, 9, 31, 0) + timedelta(minutes=attempt_number),
+    )
+
+
+def _state(submission_id: str = "submission-1", status: SubmissionStatus = SubmissionStatus.RECEIVED) -> SubmissionState:
+    return SubmissionState(
+        submission_id=submission_id,
+        status=status,
+        attempt_counts={},
+        updated_at=datetime(2026, 8, 18, 9, 40, 0),
+    )
+
+
+def test_raw_form_submission_repository_contract(postgres_repositories) -> None:
+    submission = _raw_submission()
+
+    assert postgres_repositories.raw_submissions.insert(submission) is True
+    assert postgres_repositories.raw_submissions.insert(submission) is False
+    assert postgres_repositories.raw_submissions.get(submission.submission_id) == submission
+    assert (
+        postgres_repositories.raw_submissions.find_by_response(submission.form_id, submission.response_id)
+        == submission
+    )
+    assert postgres_repositories.raw_submissions.find_by_response("demo-form", "missing") is None
+
+
+def test_normalized_application_repository_contract(postgres_repositories) -> None:
+    submission = _raw_submission()
+    postgres_repositories.raw_submissions.insert(submission)
+    first = _normalized()
+    second = replace(first, normalization_warnings=("retry-copy",))
+
+    postgres_repositories.normalized_applications.insert(first)
+    postgres_repositories.normalized_applications.insert(second)
+
+    assert postgres_repositories.normalized_applications.get(submission.submission_id) == second
+    assert postgres_repositories.normalized_applications.list_for_submission(submission.submission_id) == [
+        first,
+        second,
+    ]
+
+
+def test_assessment_repository_contract(postgres_repositories) -> None:
+    submission = _raw_submission()
+    postgres_repositories.raw_submissions.insert(submission)
+    first = _assessment()
+    second = replace(first, reasons=("Synthetic reason", "retry-copy"))
+
+    postgres_repositories.assessments.insert(first)
+    postgres_repositories.assessments.insert(second)
+
+    assert postgres_repositories.assessments.get(submission.submission_id) == second
+    assert postgres_repositories.assessments.list_for_submission(submission.submission_id) == [first, second]
+
+
+def test_narrative_repository_contract(postgres_repositories) -> None:
+    submission = _raw_submission()
+    postgres_repositories.raw_submissions.insert(submission)
+    first = _narrative(attempt_number=1, text="Narrative one")
+    second = _narrative(attempt_number=2, text="Narrative two")
+
+    postgres_repositories.narratives.insert(first)
+    postgres_repositories.narratives.insert(second)
+
+    assert postgres_repositories.narratives.get_latest(submission.submission_id) == second
+    assert postgres_repositories.narratives.list_for_submission(submission.submission_id) == [first, second]
+
+
+def test_report_repository_contract(postgres_repositories) -> None:
+    submission = _raw_submission()
+    postgres_repositories.raw_submissions.insert(submission)
+    internal = _report(report_type=ReportType.INTERNAL, ref_suffix="internal-1")
+    client_first = _report(report_type=ReportType.CLIENT, ref_suffix="client-1")
+    client_second = _report(report_type=ReportType.CLIENT, ref_suffix="client-2")
+
+    postgres_repositories.reports.insert(internal)
+    postgres_repositories.reports.insert(client_first)
+    postgres_repositories.reports.insert(client_second)
+
+    assert postgres_repositories.reports.list_for_submission(submission.submission_id) == [
+        internal,
+        client_first,
+        client_second,
+    ]
+    assert postgres_repositories.reports.get_by_type(submission.submission_id) == {
+        ReportType.INTERNAL.value: internal,
+        ReportType.CLIENT.value: client_second,
+    }
+
+
+def test_delivery_repository_contract(postgres_repositories) -> None:
+    submission = _raw_submission()
+    postgres_repositories.raw_submissions.insert(submission)
+    first = _delivery(report_type=ReportType.INTERNAL, attempt_number=1)
+    second = _delivery(report_type=ReportType.CLIENT, attempt_number=2)
+
+    postgres_repositories.deliveries.insert(first)
+    postgres_repositories.deliveries.insert(second)
+
+    assert postgres_repositories.deliveries.list_for_submission(submission.submission_id) == [first, second]
+
+
+def test_submission_state_repository_contract(postgres_repositories) -> None:
+    submission = _raw_submission()
+    postgres_repositories.raw_submissions.insert(submission)
+    state = _state()
+    postgres_repositories.submission_states.create(state)
+
+    assert postgres_repositories.submission_states.get(submission.submission_id) == state
+
+    updated_state = replace(
+        state,
+        status=SubmissionStatus.NORMALIZED,
+        attempt_counts={PipelineStage.NORMALIZATION: 1},
+        last_error=StageError(
+            stage=PipelineStage.NORMALIZATION,
+            reason_code="NONE",
+            retryable=False,
+            message="normalized",
+            attempt_count=1,
+            occurred_at=datetime(2026, 8, 18, 9, 41, 0),
+        ),
+        updated_at=datetime(2026, 8, 18, 9, 41, 0),
+    )
+
+    assert (
+        postgres_repositories.submission_states.compare_and_set(
+            submission.submission_id,
+            expected_state=state,
+            new_state=updated_state,
+        )
+        is True
+    )
+    assert postgres_repositories.submission_states.get(submission.submission_id) == updated_state
+    assert (
+        postgres_repositories.submission_states.compare_and_set(
+            submission.submission_id,
+            expected_state=state,
+            new_state=replace(updated_state, status=SubmissionStatus.CLASSIFIED),
+        )
+        is False
+    )
+
+
+def test_compare_and_set_allows_only_one_real_database_claim(postgres_dsn: str) -> None:
+    from src.persistence.postgres import PostgresRepositories
+
+    seed = PostgresRepositories(postgres_dsn.replace("postgresql://", "postgresql+psycopg://", 1))
+    submission = _raw_submission("race-submission")
+    seed.raw_submissions.insert(submission)
+    initial_state = _state("race-submission")
+    seed.submission_states.create(initial_state)
+    snapshot = seed.submission_states.get("race-submission")
+    assert snapshot is not None
+    seed.dispose()
+
+    repositories = [
+        PostgresRepositories(postgres_dsn.replace("postgresql://", "postgresql+psycopg://", 1))
+        for _ in range(2)
+    ]
+    barrier = Barrier(2)
+    results: list[bool] = []
+
+    def attempt_claim(repo) -> None:
+        candidate = replace(
+            snapshot,
+            attempt_counts={PipelineStage.NORMALIZATION: 1},
+            updated_at=datetime(2026, 8, 18, 9, 45, 0),
+        )
+        barrier.wait()
+        results.append(
+            repo.submission_states.compare_and_set(
+                "race-submission",
+                expected_state=snapshot,
+                new_state=candidate,
+            )
+        )
+
+    threads = [Thread(target=attempt_claim, args=(repo,)) for repo in repositories]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    for repo in repositories:
+        repo.dispose()
+
+    assert results.count(True) == 1
+    assert results.count(False) == 1
+
+
+def test_append_only_tables_reject_update_and_delete(postgres_repositories, postgres_dsn: str) -> None:
+    import psycopg
+
+    submission = _raw_submission()
+    postgres_repositories.raw_submissions.insert(submission)
+    postgres_repositories.normalized_applications.insert(_normalized())
+    postgres_repositories.assessments.insert(_assessment())
+    postgres_repositories.narratives.insert(_narrative())
+    postgres_repositories.reports.insert(_report(report_type=ReportType.INTERNAL, ref_suffix="internal"))
+    postgres_repositories.deliveries.insert(_delivery(report_type=ReportType.INTERNAL, attempt_number=1))
+
+    statements = {
+        "raw_form_submissions": "UPDATE raw_form_submissions SET form_id = 'changed' WHERE submission_id = 'submission-1'",
+        "normalized_applications": "DELETE FROM normalized_applications WHERE submission_id = 'submission-1'",
+        "assessments": "UPDATE assessments SET qualification = 'STANDARD' WHERE submission_id = 'submission-1'",
+        "narratives": "DELETE FROM narratives WHERE submission_id = 'submission-1'",
+        "reports": "UPDATE reports SET artifact_ref = 'changed' WHERE submission_id = 'submission-1'",
+        "deliveries": "DELETE FROM deliveries WHERE submission_id = 'submission-1'",
+    }
+
+    with psycopg.connect(postgres_dsn) as connection:
+        with connection.cursor() as cursor:
+            for table_name, statement in statements.items():
+                with pytest.raises(psycopg.Error, match="append-only table"):
+                    cursor.execute(statement)
+                connection.rollback()
+
+                cursor.execute("SELECT COUNT(*) FROM " + table_name)
+                assert cursor.fetchone() == (1,), table_name
