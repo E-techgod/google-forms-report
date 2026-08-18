@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime, timezone
 
 import logging
 from dataclasses import dataclass
@@ -33,7 +34,7 @@ class WebhookReceiver:
         self._parser = parser
         self._repositories = repositories
         self._queue = queue
-        self._now_factory = now_factory or datetime.utcnow
+        self._now_factory = lambda: datetime.now(timezone.utc)
 
     def handle(self, payload: dict[str, Any]) -> WebhookResponse:
         try:
