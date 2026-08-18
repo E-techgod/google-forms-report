@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 from collections import deque
+from typing import Protocol
+
+
+class TaskQueue(Protocol):
+    def enqueue(self, submission_id: str) -> None:
+        ...
 
 
 class InMemoryTaskQueue:

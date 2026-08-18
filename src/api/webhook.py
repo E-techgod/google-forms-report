@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime, timezone
 
 import logging
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ from uuid import uuid4
 from src.adapters.forms.parser import FormPayloadParser, InvalidPayloadError
 from src.domain.models import RawFormSubmission, SubmissionState, SubmissionStatus
 from src.persistence.interfaces import RepositoryBundle
-from src.workflows.queue import InMemoryTaskQueue
+from src.workflows.queue import TaskQueue
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,13 +28,13 @@ class WebhookReceiver:
         *,
         parser: FormPayloadParser,
         repositories: RepositoryBundle,
-        queue: InMemoryTaskQueue,
+        queue: TaskQueue,
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self._parser = parser
         self._repositories = repositories
         self._queue = queue
-        self._now_factory = now_factory or datetime.utcnow
+        self._now_factory = lambda: datetime.now(timezone.utc)
 
     def handle(self, payload: dict[str, Any]) -> WebhookResponse:
         try:
