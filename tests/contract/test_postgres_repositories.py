@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta
-from threading import Barrier, Thread
+from threading import Barrier, Event, Thread
+
+from sqlalchemy import create_engine, event, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 
 import pytest
 
@@ -20,6 +24,7 @@ from src.domain.models import (
     SubmissionState,
     SubmissionStatus,
 )
+from src.persistence.postgres.models import RawFormSubmissionRow
 
 
 def _raw_submission(submission_id: str = "submission-1") -> RawFormSubmission:
@@ -108,6 +113,79 @@ def _state(submission_id: str = "submission-1", status: SubmissionStatus = Submi
     )
 
 
+def _sqlalchemy_url(postgres_dsn: str) -> str:
+    return postgres_dsn.replace("postgresql://", "postgresql+psycopg://", 1)
+
+
+def _raw_insert_statement(submission: RawFormSubmission):
+    return (
+        pg_insert(RawFormSubmissionRow)
+        .values(
+            submission_id=submission.submission_id,
+            form_id=submission.form_id,
+            response_id=submission.response_id,
+            received_at=submission.received_at,
+            raw_payload=submission.raw_payload,
+            form_schema_version_at_receipt=submission.form_schema_version_at_receipt,
+        )
+        .on_conflict_do_nothing()
+    )
+
+
+def _run_forced_duplicate_response_overlap(postgres_dsn: str, *, label: str, contender_callable):
+    from src.persistence.postgres import PostgresRepositories
+
+    sqlalchemy_url = _sqlalchemy_url(postgres_dsn)
+    blocker_submission = _raw_submission(f"{label}-winner")
+    contender_submission = replace(
+        _raw_submission(f"{label}-loser"),
+        response_id=blocker_submission.response_id,
+    )
+    blocker_engine = create_engine(sqlalchemy_url, future=True)
+    contender_repositories = PostgresRepositories(sqlalchemy_url)
+    contender_insert_started = Event()
+    results: list[bool] = []
+    errors: list[Exception] = []
+
+    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany) -> None:
+        if "INSERT INTO raw_form_submissions" in statement:
+            contender_insert_started.set()
+
+    event.listen(contender_repositories._engine, "before_cursor_execute", before_cursor_execute)
+    try:
+        with blocker_engine.connect() as blocker_connection:
+            blocker_transaction = blocker_connection.begin()
+            blocker_connection.execute(_raw_insert_statement(blocker_submission))
+
+            def run_contender() -> None:
+                try:
+                    results.append(contender_callable(contender_repositories, contender_submission))
+                except Exception as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+
+            contender_thread = Thread(target=run_contender)
+            contender_thread.start()
+            assert contender_insert_started.wait(timeout=5), "Contender insert never reached the database"
+            blocker_transaction.commit()
+            contender_thread.join(timeout=5)
+            assert not contender_thread.is_alive(), "Contender thread remained blocked after blocker commit"
+
+            persisted_count = blocker_connection.execute(
+                select(func.count())
+                .select_from(RawFormSubmissionRow)
+                .where(
+                    RawFormSubmissionRow.form_id == blocker_submission.form_id,
+                    RawFormSubmissionRow.response_id == blocker_submission.response_id,
+                )
+            ).scalar_one()
+    finally:
+        event.remove(contender_repositories._engine, "before_cursor_execute", before_cursor_execute)
+        contender_repositories.dispose()
+        blocker_engine.dispose()
+
+    return results, errors, persisted_count
+
+
 def test_raw_form_submission_repository_contract(postgres_repositories) -> None:
     submission = _raw_submission()
 
@@ -134,38 +212,54 @@ def test_raw_form_submission_repository_contract(postgres_repositories) -> None:
 
 
 def test_raw_form_submission_insert_allows_only_one_real_database_winner_for_duplicate_response(postgres_dsn: str) -> None:
-    from src.persistence.postgres import PostgresRepositories
-
-    repositories = [
-        PostgresRepositories(postgres_dsn.replace("postgresql://", "postgresql+psycopg://", 1))
-        for _ in range(2)
-    ]
-    submissions = [
-        _raw_submission("response-race-a"),
-        replace(_raw_submission("response-race-b"), response_id="response-response-race-a"),
-    ]
-    barrier = Barrier(2)
-    results: list[bool] = []
-    errors: list[Exception] = []
-
-    def attempt_insert(index: int) -> None:
-        barrier.wait()
-        try:
-            results.append(repositories[index].raw_submissions.insert(submissions[index]))
-        except Exception as exc:  # pragma: no cover - failure path asserted by errors
-            errors.append(exc)
-
-    threads = [Thread(target=attempt_insert, args=(index,)) for index in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    for repo in repositories:
-        repo.dispose()
+    results, errors, persisted_count = _run_forced_duplicate_response_overlap(
+        postgres_dsn,
+        label="current-insert",
+        contender_callable=lambda repositories, submission: repositories.raw_submissions.insert(submission),
+    )
 
     assert errors == []
-    assert results.count(True) == 1
-    assert results.count(False) == 1
+    assert results == [False]
+    assert persisted_count == 1
+
+
+def test_old_insert_implementation_raises_under_forced_overlap(postgres_dsn: str) -> None:
+    def old_insert_logic(repositories, submission: RawFormSubmission) -> bool:
+        with repositories._session_factory.begin() as session:
+            existing = session.get(RawFormSubmissionRow, submission.submission_id)
+            if existing is not None:
+                return False
+            response_match = session.execute(
+                select(RawFormSubmissionRow.submission_id).where(
+                    RawFormSubmissionRow.form_id == submission.form_id,
+                    RawFormSubmissionRow.response_id == submission.response_id,
+                )
+            ).scalar_one_or_none()
+            if response_match is not None:
+                return False
+            session.add(
+                RawFormSubmissionRow(
+                    submission_id=submission.submission_id,
+                    form_id=submission.form_id,
+                    response_id=submission.response_id,
+                    received_at=submission.received_at,
+                    raw_payload=submission.raw_payload,
+                    form_schema_version_at_receipt=submission.form_schema_version_at_receipt,
+                )
+            )
+            session.flush()
+            return True
+
+    results, errors, persisted_count = _run_forced_duplicate_response_overlap(
+        postgres_dsn,
+        label="old-insert",
+        contender_callable=old_insert_logic,
+    )
+
+    assert results == []
+    assert len(errors) == 1
+    assert isinstance(errors[0], IntegrityError)
+    assert persisted_count == 1
 
 
 def test_raw_form_submission_insert_returns_false_for_duplicate_submission_id(postgres_repositories) -> None:
