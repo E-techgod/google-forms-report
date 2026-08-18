@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 from datetime import datetime
-from typing import Callable
+from typing import Callable, cast
 
 from src.adapters.gmail.base import EmailSender, EmailSenderError
 from src.adapters.llm.base import LLMProvider, LLMProviderError
@@ -42,7 +42,7 @@ from src.domain.validation import GenericNarrativeValidator, SemanticValidationF
 from src.persistence.interfaces import RepositoryBundle
 
 from .alerts import AlertEvent, AlertSink
-from .queue import InMemoryTaskQueue
+from .queue import InMemoryTaskQueue, TaskQueue
 
 LOGGER = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class Worker:
         repositories: RepositoryBundle,
         config: AppConfig,
         readiness_gate: ReadinessGate,
-        queue: InMemoryTaskQueue,
+        queue: TaskQueue,
         alert_sink: AlertSink,
         rule_engine: RuleEngine,
         llm_provider: LLMProvider,
@@ -76,7 +76,8 @@ class Worker:
         self._now_factory = now_factory or datetime.utcnow
 
     def process_next_task(self) -> bool:
-        submission_id = self._queue.pop()
+        # `process_next_task()` is only used by the in-memory/demo path.
+        submission_id = cast(InMemoryTaskQueue, self._queue).pop()
         if submission_id is None:
             return False
         self.process_submission(submission_id)

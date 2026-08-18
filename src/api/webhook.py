@@ -9,7 +9,7 @@ from uuid import uuid4
 from src.adapters.forms.parser import FormPayloadParser, InvalidPayloadError
 from src.domain.models import RawFormSubmission, SubmissionState, SubmissionStatus
 from src.persistence.interfaces import RepositoryBundle
-from src.workflows.queue import InMemoryTaskQueue
+from src.workflows.queue import TaskQueue
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class WebhookReceiver:
         *,
         parser: FormPayloadParser,
         repositories: RepositoryBundle,
-        queue: InMemoryTaskQueue,
+        queue: TaskQueue,
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self._parser = parser

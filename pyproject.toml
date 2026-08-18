@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "alembic>=1.16.5",
+    "google-auth>=2.55.0",
+    "google-cloud-tasks>=2.19.3",
     "psycopg[binary]>=3.2.10",
     "sqlalchemy>=2.0.43",
 ]
