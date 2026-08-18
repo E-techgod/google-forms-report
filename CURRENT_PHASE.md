@@ -1,10 +1,11 @@
 Current Phase: PHASE-03
 Name: Real Infrastructure Adapters
-Status: Checkpoint 1 (Persistence adapter) is PASS, closed 2026-08-18 —
-Codex Reviewer's fourth and final pass returned verdict "approve" with zero
-findings. Full 4-round review history in docs/phases/PHASE-03/REVIEW.md
-§10. Checkpoints 2-7 remain NOT AUTHORIZED pending separate human
-authorization for each.
+Status: Checkpoint 1 (Persistence adapter) is PASS, closed 2026-08-18, and
+pushed to origin/phase/03-real-infrastructure-adapters (latest SHA 3f5f45e
+at push time). Checkpoint 2 (Cloud Tasks queue/dispatch adapter) authorized
+2026-08-18 and in progress. Checkpoints 3-7 remain NOT AUTHORIZED pending
+separate human authorization for each. main (local and remote) is
+untouched.
 
 PHASE-01 (Architecture Foundation): APPROVED — see docs/phases/PHASE-01/STATUS.md
 PHASE-02 (Technical Skeleton): APPROVED 2026-08-18 — SPEC.md v1.1, REVIEW.md
@@ -34,13 +35,13 @@ sandbox proved unable to reach Docker or write to .git — see REVIEW.md
 phase's business logic directly
 
 Codex Builder:
-Checkpoint 1 complete (PASS). NOT authorized for Checkpoint 2 or any later
-checkpoint pending separate human authorization.
+Checkpoint 1 complete (PASS). AUTHORIZED for Checkpoint 2 (Cloud Tasks
+queue/dispatch adapter) only, exactly as defined in PHASE-03/SPEC.md §18.
+NOT authorized for Checkpoint 3 or any later checkpoint.
 
 Codex Reviewer:
-Checkpoint 1's focused review complete (approve, zero findings). Not
-authorized for further action until a later checkpoint is authorized and
-delivered.
+Checkpoint 1's focused review complete (approve, zero findings). Will
+activate once Checkpoint 2 is delivered and independently verified.
 
 Next phase:
 NOT AUTHORIZED
