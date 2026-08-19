@@ -14,6 +14,8 @@ class CloudTasksTaskQueue:
         oidc_audience: str | None = None,
         client: Any | None = None,
     ) -> None:
+        if not oidc_audience:
+            raise ValueError("Cloud Tasks OIDC audience must be configured")
         self._queue_path = queue_path
         self._push_endpoint_url = push_endpoint_url
         self._oidc_service_account_email = oidc_service_account_email
@@ -21,9 +23,10 @@ class CloudTasksTaskQueue:
         self._client = client or self._build_default_client()
 
     def enqueue(self, submission_id: str) -> None:
-        oidc_token: dict[str, str] = {"service_account_email": self._oidc_service_account_email}
-        if self._oidc_audience is not None:
-            oidc_token["audience"] = self._oidc_audience
+        oidc_token: dict[str, str] = {
+            "service_account_email": self._oidc_service_account_email,
+            "audience": self._oidc_audience,
+        }
 
         task = {
             "http_request": {

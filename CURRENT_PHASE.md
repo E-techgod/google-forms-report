@@ -1,49 +1,24 @@
-Current Phase: PHASE-03
-Name: Real Infrastructure Adapters
-Status: Checkpoint 1 (Persistence adapter) is PASS, closed 2026-08-18, and
-pushed to origin/phase/03-real-infrastructure-adapters (latest SHA 3f5f45e
-at push time). Checkpoint 2 (Cloud Tasks queue/dispatch adapter) authorized
-2026-08-18 and in progress. Checkpoints 3-7 remain NOT AUTHORIZED pending
-separate human authorization for each. main (local and remote) is
-untouched.
+# Current Phase
 
-PHASE-01 (Architecture Foundation): APPROVED — see docs/phases/PHASE-01/STATUS.md
-PHASE-02 (Technical Skeleton): APPROVED 2026-08-18 — SPEC.md v1.1, REVIEW.md
-(3 rounds, final result PASS WITH APPROVED DEFERMENTS), the uv.lock
-companion-file clarification, and the two carried-forward deferrals
-(invariant 8 / rule-version CI enforcement deferred to ADR-010; invariant 10 /
-semantic-grounding remaining heuristic, the AF-1 residual risk) are all
-human-approved — see docs/phases/PHASE-02/STATUS.md and REVIEW.md.
-PHASE-03 (Real Infrastructure Adapters): SPEC.md v3 human-approved in full
-2026-08-18, including docs/architecture/ADR-013 (Docker Compose as local
-test infrastructure). Human confirmed 2026-08-18 that Codex Builder was
-authorized for Checkpoint 1 (Persistence adapter) only. Checkpoint 1 was
-built, independently verified against a real Postgres instance, committed
-(b543b92), and given a focused Codex Reviewer pass — result FAIL, one
-high-severity finding (concurrent duplicate-submission handling can raise
-instead of returning False). No fix round or later checkpoint is authorized
-pending human direction — see docs/phases/PHASE-03/SPEC.md, STATUS.md, and
-REVIEW.md.
+Phase: PHASE-03 — Real Infrastructure Adapters
 
-Claude:
-AUTHORIZED — architecture, documentation, and review; drafted and
-self-reviewed PHASE-03/SPEC.md v3 and ADR-013; dispatched and independently
-verified Codex Builder's Checkpoint 1 work (including running the real
-Postgres-backed tests and performing the git commit after Codex Builder's
-sandbox proved unable to reach Docker or write to .git — see REVIEW.md
-§2.2); dispatched Codex Reviewer's focused review; did not implement any
-phase's business logic directly
+Status:
+- Checkpoint 1 — Persistence adapter: PASS / CLOSED
+- Checkpoint 2 — Cloud Tasks queue/dispatch adapter:
+  REVIEWED / FIX ROUND PENDING HUMAN AUTHORIZATION
+- Checkpoints 3–7: NOT AUTHORIZED
 
-Codex Builder:
-Checkpoint 1 complete (PASS). AUTHORIZED for Checkpoint 2 (Cloud Tasks
-queue/dispatch adapter) only, exactly as defined in PHASE-03/SPEC.md §18.
-NOT authorized for Checkpoint 3 or any later checkpoint.
+Current findings:
+1. OIDC audience is currently allowed to be `None`, which can bypass audience verification.
+2. Auth failures currently return non-2xx responses, causing Cloud Tasks retries contrary to SPEC.md requirements.
 
-Codex Reviewer:
-Checkpoint 1's focused review complete (approve, zero findings). Will
-activate once Checkpoint 2 is delivered and independently verified.
+Branch:
+`phase/03-real-infrastructure-adapters`
 
-Next phase:
-NOT AUTHORIZED
+Main:
+Local and remote `main` remain untouched.
 
-Codex agents may only be activated after Claude produces an approved implementation specification for a phase that contains implementation work.
+Next:
+Human decides whether to authorize Checkpoint 2 fix round.
+
+Last updated: 2026-08-19

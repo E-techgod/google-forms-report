@@ -377,6 +377,42 @@ def test_queue_redelivery_after_completion_is_a_no_op() -> None:
     _drain(worker)
 
 
+def test_record_rejected_push_emits_alert_without_mutating_submission_state() -> None:
+    receiver, worker, repositories, _, _ = _build_app()
+
+    response = _submit_payload(receiver, response_id="rejected-push-known-1")
+    submission_id = response.submission_id or ""
+    before = repositories.submission_states.get(submission_id)
+
+    worker.record_rejected_push(
+        submission_id,
+        reason_code="INVALID_OIDC_TOKEN",
+        message="Queue push rejected: invalid OIDC token",
+    )
+
+    after = repositories.submission_states.get(submission_id)
+    alert_sink = worker._alert_sink
+    assert before == after
+    assert len(alert_sink.events) == 1
+    assert alert_sink.events[0].submission_id == submission_id
+    assert alert_sink.events[0].stage == PipelineStage.NORMALIZATION
+    assert alert_sink.events[0].reason_code == "INVALID_OIDC_TOKEN"
+    assert alert_sink.events[0].message == "Queue push rejected: invalid OIDC token"
+
+
+def test_record_rejected_push_ignores_unknown_submission_without_alert_or_mutation() -> None:
+    _, worker, repositories, _, _ = _build_app()
+
+    worker.record_rejected_push(
+        "unknown-submission",
+        reason_code="MISSING_OIDC_TOKEN",
+        message="Queue push rejected: missing OIDC token",
+    )
+
+    assert repositories.submission_states.get("unknown-submission") is None
+    assert worker._alert_sink.events == []
+
+
 def test_completed_transition_is_rejected_until_all_deliveries_exist() -> None:
     receiver, worker, repositories, _, _ = _build_app()
 

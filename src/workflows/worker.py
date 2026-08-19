@@ -122,6 +122,27 @@ class Worker:
         except (LLMProviderError, ReportRendererError, EmailSenderError, ValueError) as exc:
             return self._handle_retryable_failure(state, raw_submission, stage, exc)
 
+    def record_rejected_push(
+        self,
+        submission_id: str,
+        *,
+        reason_code: str,
+        message: str,
+    ) -> None:
+        state = self._repositories.submission_states.get(submission_id)
+        if state is None or is_terminal_status(state.status):
+            return
+        stage = stage_for_status(state.status)
+        self._alert_sink.send(
+            AlertEvent(
+                submission_id=submission_id,
+                stage=stage,
+                reason_code=reason_code,
+                message=message,
+                emitted_at=self._now_factory(),
+            )
+        )
+
     def _execute_stage(
         self,
         stage: PipelineStage,
